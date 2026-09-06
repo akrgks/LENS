@@ -1,16 +1,18 @@
 import io
+import os
+import uuid
 from urllib.parse import unquote, quote
 
+import imageio_ffmpeg
+import requests
 import yt_dlp
+
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
-import os
-import subprocess
-import tempfile
-import uuid
 from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
 
 app = FastAPI(title="LENS")
+
+FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
 
 @app.get("/")
@@ -21,6 +23,10 @@ def root():
     }
 
 
+# ---------------------------------------------------------
+# Direct video streaming
+# ---------------------------------------------------------
+
 @app.get("/fetch/{target_url:path}")
 def fetch(target_url: str):
     url = unquote(target_url)
@@ -28,23 +34,18 @@ def fetch(target_url: str):
     if not url.startswith(("http://", "https://")):
         raise HTTPException(400, "Invalid URL")
 
-    buffer = io.BytesIO()
-
-    options = {
-        "format": "best[ext=mp4]/best",
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "outtmpl": "-",
-    }
-
     try:
+        options = {
+            "format": "best[ext=mp4]/best",
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+        }
+
         with yt_dlp.YoutubeDL(options) as ydl:
             info = ydl.extract_info(url, download=False)
 
-            requested = info.get("requested_formats")
-
-            if requested:
+            if info.get("requested_formats"):
                 raise RuntimeError(
                     "This media requires merging multiple formats"
                 )
@@ -53,8 +54,6 @@ def fetch(target_url: str):
 
             if not media_url:
                 raise RuntimeError("No media URL found")
-
-        import requests
 
         response = requests.get(
             media_url,
@@ -81,6 +80,12 @@ def fetch(target_url: str):
             500,
             f"Extraction failed: {e}"
         )
+
+
+# ---------------------------------------------------------
+# HTML + ALL FRAMES AT HALF FPS
+# ---------------------------------------------------------
+
 @app.get("/view/{target_url:path}")
 def view(target_url: str):
     url = unquote(target_url)
@@ -89,15 +94,19 @@ def view(target_url: str):
         raise HTTPException(400, "Invalid URL")
 
     job_id = uuid.uuid4().hex
-    workdir = os.path.join("/tmp", job_id)
-    os.makedirs(workdir, exist_ok=True)
 
-    video_path = os.path.join(workdir, "video.mp4")
+    workdir = os.path.join("/tmp", "lens", job_id)
     frames_dir = os.path.join(workdir, "frames")
+
     os.makedirs(frames_dir, exist_ok=True)
 
+    video_path = os.path.join(workdir, "video.mp4")
+
     try:
-        # Download the Reel
+        # -------------------------------------------------
+        # Download video with yt-dlp
+        # -------------------------------------------------
+
         options = {
             "format": "best[ext=mp4]/best",
             "noplaylist": True,
@@ -107,86 +116,141 @@ def view(target_url: str):
         }
 
         with yt_dlp.YoutubeDL(options) as ydl:
-            ydl.download([url])
+            info = ydl.extract_info(url, download=True)
 
-        # Get original FPS
-        probe = subprocess.run(
-            [
-                "ffprobe",
-                "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=r_frame_rate",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                video_path,
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        # Get FPS from yt-dlp metadata
+        fps = info.get("fps")
 
-        fps_text = probe.stdout.strip()
+        if not fps or fps <= 0:
+            fps = 30.0
 
-        # Convert FPS fraction like 30/1
-        num, den = map(int, fps_text.split("/"))
-        fps = num / den
+        # Half the original FPS
+        sample_fps = max(fps / 2.0, 1.0)
 
-        # Half the original frame rate
-        sample_fps = max(fps / 2, 1)
-
+        # -------------------------------------------------
         # Extract frames
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-i", video_path,
-                "-vf", f"fps={sample_fps}",
-                "-q:v", "3",
-                os.path.join(frames_dir, "frame_%06d.jpg"),
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        # -------------------------------------------------
+
+        output_pattern = os.path.join(
+            frames_dir,
+            "frame_%06d.jpg"
         )
 
+        command = [
+            FFMPEG,
+            "-y",
+            "-i",
+            video_path,
+            "-vf",
+            f"fps={sample_fps}",
+            "-q:v",
+            "3",
+            output_pattern,
+        ]
+
+        import subprocess
+
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                "FFmpeg failed:\n" + result.stderr[-2000:]
+            )
+
+        # -------------------------------------------------
+        # Find generated frames
+        # -------------------------------------------------
+
+        frame_files = sorted(
+            filename
+            for filename in os.listdir(frames_dir)
+            if filename.lower().endswith(".jpg")
+        )
+
+        if not frame_files:
+            raise RuntimeError("No frames were generated")
+
+        # -------------------------------------------------
         # Build HTML
-        frame_files = sorted(os.listdir(frames_dir))
+        # -------------------------------------------------
 
         images = "\n".join(
-            f'<img src="/frame/{job_id}/{filename}" loading="eager">'
+            f'''
+            <img
+                src="/frame/{job_id}/{quote(filename)}"
+                loading="eager"
+                style="max-width:640px;display:block;margin:10px 0;"
+            >
+            '''
             for filename in frame_files
         )
 
-        return HTMLResponse(f"""
+        html = f"""
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="UTF-8">
     <title>LENS Frame Viewer</title>
 </head>
 
 <body>
-    <h1>LENS Frame Viewer</h1>
 
-    <p>
-        Original FPS: {fps:.2f}<br>
-        Sample FPS: {sample_fps:.2f}<br>
-        Frames: {len(frame_files)}
-    </p>
+<h1>LENS Frame Viewer</h1>
 
-    {images}
+<p>
+    Original FPS: {fps:.2f}<br>
+    Sample FPS: {sample_fps:.2f}<br>
+    Frames: {len(frame_files)}
+</p>
+
+<hr>
+
+{images}
 
 </body>
 </html>
-""")
+"""
+
+        return HTMLResponse(html)
 
     except Exception as e:
-        raise HTTPException(500, f"Frame extraction failed: {e}")
+        raise HTTPException(
+            500,
+            f"Frame extraction failed: {e}"
+        )
 
+
+# ---------------------------------------------------------
+# Individual frame endpoint
+# ---------------------------------------------------------
 
 @app.get("/frame/{job_id}/{filename}")
 def frame(job_id: str, filename: str):
-    path = os.path.join("/tmp", job_id, "frames", filename)
+
+    # Prevent path traversal
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(400, "Invalid filename")
+
+    path = os.path.join(
+        "/tmp",
+        "lens",
+        job_id,
+        "frames",
+        filename
+    )
 
     if not os.path.isfile(path):
-        raise HTTPException(404, "Frame not found")
+        raise HTTPException(
+            404,
+            "Frame not found"
+        )
 
-    return FileResponse(path, media_type="image/jpeg")
+    return FileResponse(
+        path,
+        media_type="image/jpeg"
+    )
