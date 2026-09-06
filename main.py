@@ -1,5 +1,5 @@
 import io
-from urllib.parse import unquote
+from urllib.parse import unquote, quote
 
 import yt_dlp
 from fastapi import FastAPI, HTTPException
@@ -76,3 +76,27 @@ def fetch(target_url: str):
             500,
             f"Extraction failed: {e}"
         )
+@app.get("/view/{target_url:path}")
+def view(target_url: str):
+    url = unquote(target_url)
+
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "Invalid URL")
+
+    video_url = "/fetch/" + quote(url, safe="")
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>LENS Media Viewer</title>
+    </head>
+    <body>
+        <h1>LENS Media Viewer</h1>
+
+        <video controls width="640">
+            <source src="{video_url}" type="video/mp4">
+        </video>
+    </body>
+    </html>
+    """
