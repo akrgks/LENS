@@ -1,7 +1,7 @@
 import uuid
 from pathlib import Path
 from urllib.parse import urlparse
-
+from fastapi import Request
 import yt_dlp
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -26,7 +26,7 @@ def root():
 
 
 @app.get("/fetch")
-def fetch(url: str):
+def fetch(url: str, request: Request):
     if not is_valid_url(url):
         raise HTTPException(400, "Invalid URL")
 
@@ -63,7 +63,7 @@ def fetch(url: str):
         "title": info.get("title"),
         "duration": info.get("duration"),
         "uploader": info.get("uploader"),
-        "video": f"/media/{files[0].name}"
+        "video": str(request.base_url) + f"media/{files[0].name}"
     }
 
 
