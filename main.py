@@ -3,7 +3,7 @@ from urllib.parse import unquote, quote
 
 import yt_dlp
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 app = FastAPI(title="LENS")
 
@@ -85,18 +85,18 @@ def view(target_url: str):
 
     video_url = "/fetch/" + quote(url, safe="")
 
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>LENS Media Viewer</title>
-    </head>
-    <body>
-        <h1>LENS Media Viewer</h1>
+    return HTMLResponse(f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>LENS Media Viewer</title>
+</head>
+<body>
+    <h1>LENS Media Viewer</h1>
 
-        <video controls width="640">
-            <source src="{video_url}" type="video/mp4">
-        </video>
-    </body>
-    </html>
-    """
+    <video controls width="640">
+        <source src="{video_url}" type="video/mp4">
+    </video>
+</body>
+</html>
+""")
